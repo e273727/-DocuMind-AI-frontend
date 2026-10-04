@@ -2,22 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   FileUp, 
   CloudLightning, 
-  Database, 
   FileQuestion, 
   FileText, 
   RefreshCw, 
   Check, 
   AlertTriangle, 
-  Info, 
-  XCircle,
   Trash2,
   Layers,
-  Sparkles,
   CheckSquare,
-  Square,
-  Network,
-  X,
-  ListOrdered
+  Square
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5000/api';
@@ -37,14 +30,6 @@ export default function DocumentDashboard({
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressText, setProgressText] = useState('');
-  const [cancelling, setCancelling] = useState(false);
-  
-  // Executive summary & graph state
-  const [docSummary, setDocSummary] = useState(null);
-  const [loadingSummary, setLoadingSummary] = useState(false);
-  const [showGraphModal, setShowGraphModal] = useState(false);
-  const [graphData, setGraphData] = useState(null);
-  const [loadingGraph, setLoadingGraph] = useState(false);
   
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
@@ -53,15 +38,6 @@ export default function DocumentDashboard({
   useEffect(() => {
     fetchDocuments();
   }, []);
-
-  // When activeDoc changes, fetch its detailed executive summary
-  useEffect(() => {
-    if (activeDoc && activeDoc.status === 'processed') {
-      fetchDocDetails(activeDoc.id);
-    } else {
-      setDocSummary(null);
-    }
-  }, [activeDoc?.id, activeDoc?.status]);
 
   // Polling for processing documents
   useEffect(() => {
@@ -97,44 +73,6 @@ export default function DocumentDashboard({
       console.error('Error fetching documents:', err);
     } finally {
       setLoadingDocs(false);
-    }
-  };
-
-  const fetchDocDetails = async (docId) => {
-    setLoadingSummary(true);
-    try {
-      const res = await fetch(`${API_BASE}/documents/${docId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setDocSummary({
-          summary: data.summary,
-          keyTakeaways: data.key_takeaways || []
-        });
-      }
-    } catch (err) {
-      console.error('Error fetching document details:', err);
-    } finally {
-      setLoadingSummary(false);
-    }
-  };
-
-  const fetchConceptGraph = async (docId) => {
-    setLoadingGraph(true);
-    setShowGraphModal(true);
-    try {
-      const res = await fetch(`${API_BASE}/documents/${docId}/graph`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch concept graph');
-      setGraphData(data.graph);
-    } catch (err) {
-      alert(`Concept graph error: ${err.message}`);
-      setShowGraphModal(false);
-    } finally {
-      setLoadingGraph(false);
     }
   };
 
@@ -355,9 +293,9 @@ export default function DocumentDashboard({
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
             <Layers className="header-icon text-accent" size={18} />
             <div>
-              <h3>Document Library</h3>
+              <h3>Document Hub</h3>
               <p className="card-subtitle">
-                {documents.length} document{documents.length === 1 ? '' : 's'} &bull; Select up to 5 for multi-doc synthesis
+                {documents.length} document{documents.length === 1 ? '' : 's'} &bull; Pick up to 5
               </p>
             </div>
           </div>
@@ -373,7 +311,7 @@ export default function DocumentDashboard({
         </div>
 
         {documents.length === 0 ? (
-          <div className="doc-status-empty" style={{ padding: '1.5rem 1rem' }}>
+          <div className="doc-status-empty" style={{ padding: '2rem 1rem' }}>
             <FileQuestion className="empty-icon" />
             <p>No documents found. Upload a PDF above to begin.</p>
           </div>
@@ -393,7 +331,7 @@ export default function DocumentDashboard({
                     <button
                       type="button"
                       className="btn-select-checkbox"
-                      title={isSelected ? "Deselect for multi-doc chat" : "Select for multi-doc chat"}
+                      title={isSelected ? "Deselect from query" : "Select for multi-doc query"}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (onToggleSelectDoc) onToggleSelectDoc(doc);
@@ -431,140 +369,6 @@ export default function DocumentDashboard({
           </div>
         )}
       </div>
-
-      {/* Active Document Insights & Concept Graph Card */}
-      {activeDoc && (
-        <div className="glass-card active-insights-card">
-          <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-              <Database className="header-icon" size={18} />
-              <div>
-                <h3 className="truncate" style={{ maxWidth: '200px' }}>{activeDoc.filename}</h3>
-                <p className="card-subtitle">Active Document Insights</p>
-              </div>
-            </div>
-
-            {activeDoc.status === 'processed' && (
-              <button 
-                type="button" 
-                className="btn btn-secondary btn-xs"
-                onClick={() => fetchConceptGraph(activeDoc.id)}
-                title="View Concept Knowledge Flow"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}
-              >
-                <Network size={14} className="text-accent" />
-                <span>Concept Graph</span>
-              </button>
-            )}
-          </div>
-
-          {activeDoc.status === 'processing' && (
-            <div className="processing-warning">
-              <RefreshCw className="spin icon-xs" />
-              <span>Extracting tables, semantic chunks, and vector embeddings...</span>
-            </div>
-          )}
-
-          {activeDoc.status === 'failed' && (
-            <div className="processing-warning" style={{ background: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.3)', color: '#fca5a5' }}>
-              <AlertTriangle className="icon-xs" />
-              <span>Extraction failed. Please try a different PDF or re-upload.</span>
-            </div>
-          )}
-
-          {activeDoc.status === 'processed' && docSummary && (
-            <div className="executive-summary-block">
-              {docSummary.summary && (
-                <div className="summary-paragraph">
-                  <div className="summary-header">
-                    <Sparkles size={14} className="text-accent" />
-                    <strong>Executive Summary</strong>
-                  </div>
-                  <p>{docSummary.summary}</p>
-                </div>
-              )}
-
-              {docSummary.keyTakeaways && docSummary.keyTakeaways.length > 0 && (
-                <div className="takeaways-list">
-                  <div className="summary-header">
-                    <ListOrdered size={14} className="text-accent" />
-                    <strong>Key Takeaways</strong>
-                  </div>
-                  <ul>
-                    {docSummary.keyTakeaways.map((point, idx) => (
-                      <li key={idx}>{point}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Concept Graph Modal */}
-      {showGraphModal && (
-        <div className="citation-modal-overlay" onClick={() => setShowGraphModal(false)}>
-          <div className="citation-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '680px' }}>
-            <div className="citation-modal-header">
-              <div className="citation-modal-title">
-                <Network className="text-accent" size={20} />
-                <span>Concept Knowledge Graph &bull; {activeDoc?.filename}</span>
-              </div>
-              <button 
-                type="button" 
-                className="btn btn-ghost btn-sm" 
-                onClick={() => setShowGraphModal(false)}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="citation-modal-body">
-              {loadingGraph ? (
-                <div style={{ textAlign: 'center', padding: '2rem' }}>
-                  <RefreshCw className="spin icon-sm text-accent" />
-                  <p style={{ marginTop: '0.75rem', color: 'var(--text-secondary)' }}>Synthesizing knowledge graph entities and links...</p>
-                </div>
-              ) : graphData && graphData.nodes && graphData.nodes.length > 0 ? (
-                <div>
-                  <h4 style={{ marginBottom: '0.75rem', fontSize: '0.95rem', color: '#ddd6fe' }}>Key Extracted Entities & Concepts:</h4>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                    {graphData.nodes.map((node, i) => (
-                      <span 
-                        key={i} 
-                        className="citation-chip" 
-                        style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
-                      >
-                        <strong>{node.id}</strong> ({node.group || 'Concept'})
-                      </span>
-                    ))}
-                  </div>
-
-                  {graphData.links && graphData.links.length > 0 && (
-                    <div>
-                      <h4 style={{ marginBottom: '0.75rem', fontSize: '0.95rem', color: '#ddd6fe' }}>Conceptual Relationships:</h4>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        {graphData.links.map((link, j) => (
-                          <div key={j} className="citation-snippet-card" style={{ padding: '0.6rem 0.85rem' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                              <span style={{ color: '#a78bfa', fontWeight: 600 }}>{link.source}</span>
-                              <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>──[{link.relationship || 'relates to'}]──▶</span>
-                              <span style={{ color: '#38bdf8', fontWeight: 600 }}>{link.target}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '1rem' }}>No concept entities found for this document.</p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
