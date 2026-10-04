@@ -9,6 +9,41 @@ export default function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || null);
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('user')) || null);
   const [activeDoc, setActiveDoc] = useState(JSON.parse(localStorage.getItem('activeDoc')) || null);
+  const [selectedDocs, setSelectedDocs] = useState(
+    JSON.parse(localStorage.getItem('selectedDocs')) || (activeDoc ? [activeDoc] : [])
+  );
+
+  const handleSelectDoc = (doc) => {
+    setActiveDoc(doc);
+    setSelectedDocs([doc]);
+    localStorage.setItem('activeDoc', JSON.stringify(doc));
+    localStorage.setItem('selectedDocs', JSON.stringify([doc]));
+  };
+
+  const handleToggleSelectDoc = (doc) => {
+    setSelectedDocs(prev => {
+      const exists = prev.some(d => d.id === doc.id);
+      let updated;
+      if (exists) {
+        updated = prev.filter(d => d.id !== doc.id);
+      } else {
+        if (prev.length >= 5) {
+          alert("You can select up to 5 documents simultaneously for cross-document query.");
+          return prev;
+        }
+        updated = [...prev, doc];
+      }
+      if (updated.length > 0) {
+        setActiveDoc(updated[0]);
+        localStorage.setItem('activeDoc', JSON.stringify(updated[0]));
+      } else {
+        setActiveDoc(null);
+        localStorage.removeItem('activeDoc');
+      }
+      localStorage.setItem('selectedDocs', JSON.stringify(updated));
+      return updated;
+    });
+  };
 
   const handleAuthSuccess = (newToken, newUser) => {
     localStorage.setItem('token', newToken);
@@ -21,14 +56,18 @@ export default function App() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('activeDoc');
+    localStorage.removeItem('selectedDocs');
     setToken(null);
     setUser(null);
     setActiveDoc(null);
+    setSelectedDocs([]);
   };
 
   const handleCancelCleanup = () => {
     localStorage.removeItem('activeDoc');
+    localStorage.removeItem('selectedDocs');
     setActiveDoc(null);
+    setSelectedDocs([]);
   };
 
   return (
@@ -73,11 +112,15 @@ export default function App() {
                   token={token} 
                   activeDoc={activeDoc} 
                   setActiveDoc={setActiveDoc}
+                  selectedDocs={selectedDocs}
+                  onSelectDoc={handleSelectDoc}
+                  onToggleSelectDoc={handleToggleSelectDoc}
                   onCancelCleanup={handleCancelCleanup}
                 />
                 <Chat 
                   token={token} 
                   activeDoc={activeDoc} 
+                  selectedDocs={selectedDocs}
                 />
               </div>
             </section>
