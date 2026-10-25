@@ -7,8 +7,7 @@ import {
   RefreshCw, 
   AlertTriangle, 
   FileText,
-  Calendar,
-  Layers
+  Calendar
 } from 'lucide-react';
 
 export default function InsightsDrawer({

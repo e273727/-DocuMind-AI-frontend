@@ -13,8 +13,7 @@ import {
   LogOut, 
   User, 
   X,
-  Layers,
-  Sparkles
+  Layers
 } from 'lucide-react';
 
 export default function Sidebar({

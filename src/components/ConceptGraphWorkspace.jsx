@@ -12,16 +12,22 @@ import {
   Network, 
   Sparkles, 
   FileText, 
-  ExternalLink, 
   MessageSquare, 
   X, 
   HelpCircle,
-  FileKey,
   FolderTree,
-  ChevronDown
+  FileKey
 } from 'lucide-react';
+import { API_BASE } from '../config/api';
+import { authFetch } from '../utils/auth';
 
-const API_BASE = 'http://localhost:5000/api';
+const CATEGORY_COLORS = {
+  hardware: { color: '#10b981', border: 'rgba(16, 185, 129, 0.45)', bg: 'rgba(16, 185, 129, 0.1)', glow: 'rgba(16, 185, 129, 0.3)', text: '#6ee7b7' },
+  type: { color: '#f59e0b', border: 'rgba(245, 158, 11, 0.45)', bg: 'rgba(245, 158, 11, 0.1)', glow: 'rgba(245, 158, 11, 0.3)', text: '#fcd34d' },
+  process: { color: '#f43f5e', border: 'rgba(244, 63, 94, 0.45)', bg: 'rgba(244, 63, 94, 0.1)', glow: 'rgba(244, 63, 94, 0.3)', text: '#fda4af' },
+  software: { color: '#0ea5e9', border: 'rgba(14, 165, 233, 0.45)', bg: 'rgba(14, 165, 233, 0.1)', glow: 'rgba(14, 165, 233, 0.3)', text: '#7dd3fc' },
+  concept: { color: '#8b5cf6', border: 'rgba(139, 92, 246, 0.45)', bg: 'rgba(139, 92, 246, 0.1)', glow: 'rgba(139, 92, 246, 0.3)', text: '#c4b5fd' }
+};
 
 export default function ConceptGraphWorkspace({
   token,
@@ -33,6 +39,9 @@ export default function ConceptGraphWorkspace({
   const [graphData, setGraphData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // View Mode: 'mindmap' (two-sided balanced tree) or 'network' (organic 2D force graph)
+  const [viewMode, setViewMode] = useState('mindmap');
 
   // Interaction State
   const [selectedNodeId, setSelectedNodeId] = useState(null);
@@ -49,6 +58,26 @@ export default function ConceptGraphWorkspace({
   const zoomGroupRef = useRef(null);
   const containerRef = useRef(null);
 
+  // Category Theme Helper
+  const getCategoryTheme = useCallback((group) => {
+    const g = String(group || '').toLowerCase();
+    if (g.includes('hardware') || g.includes('device') || g.includes('resource') || g.includes('cpu') || g.includes('memory') || g.includes('gpu')) return CATEGORY_COLORS.hardware;
+    if (g.includes('type') || g.includes('model') || g.includes('class') || g.includes('paradigm')) return CATEGORY_COLORS.type;
+    if (g.includes('process') || g.includes('schedul') || g.includes('concurr') || g.includes('thread') || g.includes('starvat') || g.includes('time')) return CATEGORY_COLORS.process;
+    if (g.includes('soft') || g.includes('app') || g.includes('user') || g.includes('system') || g.includes('os')) return CATEGORY_COLORS.software;
+    return CATEGORY_COLORS.concept;
+  }, []);
+
+  // Node Dimensions Helper
+  const getNodeDimensions = useCallback((level) => {
+    switch (level) {
+      case 0: return { width: 210, height: 50, rx: 25 };
+      case 1: return { width: 185, height: 46, rx: 10 };
+      case 2: return { width: 165, height: 40, rx: 8 };
+      default: return { width: 150, height: 36, rx: 6 };
+    }
+  }, []);
+
   // Fetch concept graph
   useEffect(() => {
     if (activeDoc && activeDoc.status === 'processed') {
@@ -59,13 +88,15 @@ export default function ConceptGraphWorkspace({
     }
   }, [activeDoc?.id, activeDoc?.status]);
 
-  const fetchGraph = async (docId) => {
+  const fetchGraph = async (docId, forceRegenerate = false) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/documents/${docId}/graph`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const url = forceRegenerate 
+        ? `${API_BASE}/documents/${docId}/graph/generate`
+        : `${API_BASE}/documents/${docId}/graph`;
+      const options = forceRegenerate ? { method: 'POST' } : {};
+      const res = await authFetch(url, options, token);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to fetch concept graph');
       
@@ -78,9 +109,10 @@ export default function ConceptGraphWorkspace({
         const defaultExpanded = new Set();
         if (root) {
           defaultExpanded.add(root.id);
-          // Auto-select root initially
           setSelectedNodeId(root.id);
         }
+        // Expand level 1 nodes so primary branches are immediately readable
+        g.nodes.filter(n => n.level === 1).forEach(n => defaultExpanded.add(n.id));
         setExpandedNodes(defaultExpanded);
       }
     } catch (err) {
@@ -155,11 +187,10 @@ export default function ConceptGraphWorkspace({
     return trail;
   }, [selectedNode, nodeMap]);
 
-  // Hierarchical Layout Calculation (Left-to-Right Organic Mind Map Flow)
-  const layout = useMemo(() => {
-    if (!rootNode || !graphData) return { nodes: [], links: [], bounds: { minX: 0, maxX: 800, minY: 0, maxY: 600 } };
+  // Two-Sided Balanced Mind Map Layout Calculation
+  const mindmapLayout = useMemo(() => {
+    if (!rootNode || !graphData) return { nodes: [], links: [] };
 
-    // Build visible hierarchy tree based on expandedNodes
     const buildHierarchy = (nodeId) => {
       const node = nodeMap.get(nodeId);
       if (!node) return null;
@@ -180,99 +211,191 @@ export default function ConceptGraphWorkspace({
     };
 
     const rootHierarchyData = buildHierarchy(rootNode.id);
-    if (!rootHierarchyData) return { nodes: [], links: [], bounds: { minX: 0, maxX: 800, minY: 0, maxY: 600 } };
+    if (!rootHierarchyData) return { nodes: [], links: [] };
 
-    const hierarchyRoot = d3.hierarchy(rootHierarchyData);
-
-    // Layout dimensions
-    // Horizontal distance per level
-    const levelSpacing = [260, 240, 220, 200];
-    // Dynamic node size based on number of visible leaves
-    const leafCount = hierarchyRoot.leaves().length;
-    const treeHeight = Math.max(leafCount * 68, 500);
-
-    const treeLayout = d3.tree()
-      .nodeSize([68, 250])
-      .separation((a, b) => (a.parent === b.parent ? 1.15 : 1.35));
-
-    treeLayout(hierarchyRoot);
-
+    const rootDim = getNodeDimensions(0);
     const layoutNodes = [];
     const layoutLinks = [];
 
-    // Dimensions helper per level
-    const getNodeDimensions = (level) => {
-      switch (level) {
-        case 0: return { width: 190, height: 48, rx: 12 };
-        case 1: return { width: 165, height: 42, rx: 10 };
-        case 2: return { width: 145, height: 36, rx: 8 };
-        default: return { width: 130, height: 32, rx: 6 };
-      }
-    };
-
-    hierarchyRoot.each(d => {
-      const dim = getNodeDimensions(d.data.level);
-      // d.x is vertical in d3.tree, d.y is horizontal
-      const x = d.y + 80;
-      const y = d.x + treeHeight / 2;
-
-      layoutNodes.push({
-        id: d.data.id,
-        title: d.data.title || d.data.id,
-        group: d.data.group,
-        level: d.data.level,
-        summary: d.data.summary,
-        sourceReferences: d.data.sourceReferences,
-        related: d.data.related,
-        totalChildren: d.data._totalChildren,
-        isExpanded: d.data._isExpanded,
-        x,
-        y,
-        width: dim.width,
-        height: dim.height,
-        rx: dim.rx,
-        depth: d.depth
-      });
+    // Root placed at (0, 0) in center
+    layoutNodes.push({
+      id: rootHierarchyData.id,
+      title: rootHierarchyData.title || rootHierarchyData.id,
+      group: rootHierarchyData.group,
+      level: 0,
+      summary: rootHierarchyData.summary,
+      sourceReferences: rootHierarchyData.sourceReferences,
+      related: rootHierarchyData.related,
+      totalChildren: rootHierarchyData._totalChildren,
+      isExpanded: rootHierarchyData._isExpanded,
+      x: -rootDim.width / 2,
+      y: -rootDim.height / 2,
+      width: rootDim.width,
+      height: rootDim.height,
+      rx: rootDim.rx,
+      side: 'center',
+      depth: 0
     });
 
-    // Visible Tree Links
-    hierarchyRoot.links().forEach(link => {
-      const sDim = getNodeDimensions(link.source.data.level);
-      const tDim = getNodeDimensions(link.target.data.level);
+    const rootChildren = rootHierarchyData.children || [];
+    if (rootChildren.length > 0) {
+      // Split branches: half to the Right, half to the Left
+      const half = Math.ceil(rootChildren.length / 2);
+      const rightBranches = rootChildren.slice(0, half);
+      const leftBranches = rootChildren.slice(half);
 
-      layoutLinks.push({
-        id: `${link.source.data.id}->${link.target.data.id}`,
-        sourceId: link.source.data.id,
-        targetId: link.target.data.id,
-        source: {
-          x: link.source.y + 80 + sDim.width,
-          y: link.source.x + treeHeight / 2 + sDim.height / 2
-        },
-        target: {
-          x: link.target.y + 80,
-          y: link.target.x + treeHeight / 2 + tDim.height / 2
-        },
-        isTreeLink: true,
-        relationship: 'contains'
-      });
-    });
+      const processBranchSide = (branches, side) => {
+        if (!branches || branches.length === 0) return;
 
-    // Cross-cutting links (if both endpoints are currently visible in layout)
+        const dummyRoot = {
+          id: '__dummy__',
+          children: branches
+        };
+        const hierarchy = d3.hierarchy(dummyRoot);
+
+        const treeLayout = d3.tree()
+          .nodeSize([54, 250])
+          .separation((a, b) => (a.parent === b.parent ? 1.15 : 1.3));
+
+        treeLayout(hierarchy);
+
+        // Map layout nodes
+        hierarchy.each(d => {
+          if (d.depth === 0) return;
+          const dim = getNodeDimensions(d.data.level);
+
+          let x, y;
+          if (side === 'right') {
+            x = (rootDim.width / 2 + 75) + (d.depth - 1) * 245;
+            y = d.x - dim.height / 2;
+          } else {
+            x = -(rootDim.width / 2 + 75) - (d.depth - 1) * 245 - dim.width;
+            y = d.x - dim.height / 2;
+          }
+
+          layoutNodes.push({
+            id: d.data.id,
+            title: d.data.title || d.data.id,
+            group: d.data.group,
+            level: d.data.level,
+            summary: d.data.summary,
+            sourceReferences: d.data.sourceReferences,
+            related: d.data.related,
+            totalChildren: d.data._totalChildren,
+            isExpanded: d.data._isExpanded,
+            x,
+            y,
+            width: dim.width,
+            height: dim.height,
+            rx: dim.rx,
+            side,
+            depth: d.depth
+          });
+        });
+
+        // Map branch links
+        hierarchy.links().forEach(link => {
+          if (link.source.depth === 0) {
+            const tNode = layoutNodes.find(n => n.id === link.target.data.id);
+            if (!tNode) return;
+
+            const directRel = graphData.links?.find(l => 
+              l.source === rootNode.id && l.target === tNode.id
+            )?.relationship;
+            const revRel = graphData.links?.find(l => 
+              l.source === tNode.id && l.target === rootNode.id
+            )?.relationship;
+
+            let sourcePt, targetPt;
+            if (side === 'right') {
+              sourcePt = { x: rootDim.width / 2, y: 0 };
+              targetPt = { x: tNode.x - 4, y: tNode.y + tNode.height / 2 };
+            } else {
+              sourcePt = { x: -rootDim.width / 2, y: 0 };
+              targetPt = { x: tNode.x + tNode.width + 4, y: tNode.y + tNode.height / 2 };
+            }
+
+            layoutLinks.push({
+              id: `${rootNode.id}->${tNode.id}`,
+              sourceId: rootNode.id,
+              targetId: tNode.id,
+              source: sourcePt,
+              target: targetPt,
+              side,
+              isTreeLink: true,
+              relationship: directRel || revRel || 'encompasses'
+            });
+          } else {
+            const sNode = layoutNodes.find(n => n.id === link.source.data.id);
+            const tNode = layoutNodes.find(n => n.id === link.target.data.id);
+            if (!sNode || !tNode) return;
+
+            const directRel = graphData.links?.find(l => 
+              l.source === sNode.id && l.target === tNode.id
+            )?.relationship;
+            const revRel = graphData.links?.find(l => 
+              l.source === tNode.id && l.target === sNode.id
+            )?.relationship;
+
+            let sourcePt, targetPt;
+            if (side === 'right') {
+              sourcePt = { x: sNode.x + sNode.width, y: sNode.y + sNode.height / 2 };
+              targetPt = { x: tNode.x - 4, y: tNode.y + tNode.height / 2 };
+            } else {
+              sourcePt = { x: sNode.x, y: sNode.y + sNode.height / 2 };
+              targetPt = { x: tNode.x + tNode.width + 4, y: tNode.y + tNode.height / 2 };
+            }
+
+            layoutLinks.push({
+              id: `${sNode.id}->${tNode.id}`,
+              sourceId: sNode.id,
+              targetId: tNode.id,
+              source: sourcePt,
+              target: targetPt,
+              side,
+              isTreeLink: true,
+              relationship: directRel || revRel || 'contains'
+            });
+          }
+        });
+      };
+
+      processBranchSide(rightBranches, 'right');
+      processBranchSide(leftBranches, 'left');
+    }
+
+    // Cross-cutting links between visible nodes
     const visibleMap = new Map(layoutNodes.map(n => [n.id, n]));
     if (graphData.links) {
       graphData.links.forEach(l => {
         const s = visibleMap.get(l.source);
         const t = visibleMap.get(l.target);
         if (s && t && s.id !== t.id) {
-          // Check if not already a tree link
-          const isTree = layoutLinks.some(tl => tl.sourceId === s.id && tl.targetId === t.id);
+          const isTree = layoutLinks.some(tl => (tl.sourceId === s.id && tl.targetId === t.id) || (tl.sourceId === t.id && tl.targetId === s.id));
           if (!isTree) {
+            let sourcePt = { x: s.x + s.width / 2, y: s.y + s.height / 2 };
+            let targetPt = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+
+            if (t.x > s.x + s.width) {
+              sourcePt = { x: s.x + s.width, y: s.y + s.height / 2 };
+              targetPt = { x: t.x - 4, y: t.y + t.height / 2 };
+            } else if (t.x + t.width < s.x) {
+              sourcePt = { x: s.x, y: s.y + s.height / 2 };
+              targetPt = { x: t.x + t.width + 4, y: t.y + t.height / 2 };
+            } else if (t.y > s.y) {
+              sourcePt = { x: s.x + s.width / 2, y: s.y + s.height };
+              targetPt = { x: t.x + t.width / 2, y: t.y - 4 };
+            } else {
+              sourcePt = { x: s.x + s.width / 2, y: s.y };
+              targetPt = { x: t.x + t.width / 2, y: t.y + t.height + 4 };
+            }
+
             layoutLinks.push({
               id: `rel:${s.id}->${t.id}`,
               sourceId: s.id,
               targetId: t.id,
-              source: { x: s.x + s.width / 2, y: s.y + s.height / 2 },
-              target: { x: t.x + t.width / 2, y: t.y + t.height / 2 },
+              source: sourcePt,
+              target: targetPt,
               isTreeLink: false,
               relationship: l.relationship || 'relates to'
             });
@@ -282,7 +405,113 @@ export default function ConceptGraphWorkspace({
     }
 
     return { nodes: layoutNodes, links: layoutLinks };
-  }, [rootNode, graphData, expandedNodes, nodeMap]);
+  }, [rootNode, graphData, expandedNodes, nodeMap, getNodeDimensions]);
+
+  // Force Network Layout Calculation
+  const networkLayout = useMemo(() => {
+    if (!graphData?.nodes || graphData.nodes.length === 0) return { nodes: [], links: [] };
+
+    // Visible nodes based on expanded ancestors
+    const visibleNodes = graphData.nodes.filter(n => {
+      if (n.id === rootNode?.id) return true;
+      if (!n.parent) return true;
+      let curr = n.parent;
+      let safety = 0;
+      while (curr && safety++ < 10) {
+        if (!expandedNodes.has(curr)) return false;
+        const pNode = nodeMap.get(curr);
+        curr = pNode ? pNode.parent : null;
+      }
+      return true;
+    });
+
+    const netNodes = visibleNodes.map(n => {
+      const dim = getNodeDimensions(n.level);
+      return {
+        ...n,
+        width: dim.width,
+        height: dim.height,
+        rx: dim.rx,
+        x: (Math.random() - 0.5) * 400,
+        y: (Math.random() - 0.5) * 400
+      };
+    });
+
+    const netMap = new Map(netNodes.map(n => [n.id, n]));
+    const netLinks = (graphData.links || [])
+      .filter(l => netMap.has(l.source) && netMap.has(l.target))
+      .map(l => ({
+        id: `${l.source}->${l.target}`,
+        source: l.source,
+        target: l.target,
+        sourceId: l.source,
+        targetId: l.target,
+        relationship: l.relationship || 'relates to',
+        isTreeLink: false
+      }));
+
+    const simulation = d3.forceSimulation(netNodes)
+      .force('link', d3.forceLink(netLinks).id(d => d.id).distance(150))
+      .force('charge', d3.forceManyBody().strength(-400))
+      .force('center', d3.forceCenter(0, 0))
+      .force('collision', d3.forceCollide().radius(80))
+      .stop();
+
+    for (let i = 0; i < 120; ++i) simulation.tick();
+
+    const finalLinks = netLinks.map(l => {
+      const s = typeof l.source === 'object' ? l.source : netMap.get(l.source);
+      const t = typeof l.target === 'object' ? l.target : netMap.get(l.target);
+      return {
+        ...l,
+        source: { x: s.x, y: s.y },
+        target: { x: t.x, y: t.y }
+      };
+    });
+
+    const finalNodes = netNodes.map(n => ({
+      ...n,
+      x: n.x - n.width / 2,
+      y: n.y - n.height / 2
+    }));
+
+    return { nodes: finalNodes, links: finalLinks };
+  }, [graphData, rootNode, expandedNodes, nodeMap, getNodeDimensions]);
+
+  // Active Layout Selection
+  const layout = viewMode === 'network' ? networkLayout : mindmapLayout;
+
+  // Fit view helper
+  const handleFitView = useCallback(() => {
+    if (!svgRef.current || !layout.nodes || layout.nodes.length === 0) return;
+
+    const svg = d3.select(svgRef.current);
+    const bounds = {
+      minX: d3.min(layout.nodes, d => d.x) || -400,
+      maxX: d3.max(layout.nodes, d => d.x + d.width) || 400,
+      minY: d3.min(layout.nodes, d => d.y) || -300,
+      maxY: d3.max(layout.nodes, d => d.y + d.height) || 300,
+    };
+
+    const width = containerRef.current ? containerRef.current.clientWidth : 1000;
+    const height = containerRef.current ? containerRef.current.clientHeight : 700;
+
+    const effectiveWidth = selectedNodeId ? Math.max(width - 360, 400) : width;
+
+    const dx = bounds.maxX - bounds.minX;
+    const dy = bounds.maxY - bounds.minY;
+    const x = (bounds.minX + bounds.maxX) / 2;
+    const y = (bounds.minY + bounds.maxY) / 2;
+
+    const scale = Math.max(0.45, Math.min(1.0, 0.82 / Math.max(dx / effectiveWidth, dy / height)));
+    const translate = [effectiveWidth / 2 - scale * x, height / 2 - scale * y];
+
+    if (zoomBehaviorRef.current) {
+      svg.transition()
+        .duration(650)
+        .call(zoomBehaviorRef.current.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
+    }
+  }, [layout.nodes, selectedNodeId]);
 
   // Setup D3 Zoom & Pan
   useEffect(() => {
@@ -292,7 +521,7 @@ export default function ConceptGraphWorkspace({
     const zoomGroup = d3.select(zoomGroupRef.current);
 
     const zoom = d3.zoom()
-      .scaleExtent([0.3, 2.5])
+      .scaleExtent([0.25, 2.5])
       .on('zoom', (event) => {
         zoomGroup.attr('transform', event.transform);
       });
@@ -300,48 +529,14 @@ export default function ConceptGraphWorkspace({
     zoomBehaviorRef.current = zoom;
     svg.call(zoom);
 
-    // Initial center fit
+    // Center fit on graph update or view switch
     handleFitView();
-
-    // Disable double click zoom to allow node click
     svg.on('dblclick.zoom', null);
 
-  }, [graphData?.rootId]);
-
-  // Fit view helper
-  const handleFitView = useCallback(() => {
-    if (!svgRef.current || !layout.nodes || layout.nodes.length === 0) return;
-
-    const svg = d3.select(svgRef.current);
-    const bounds = {
-      minX: d3.min(layout.nodes, d => d.x) || 0,
-      maxX: d3.max(layout.nodes, d => d.x + d.width) || 800,
-      minY: d3.min(layout.nodes, d => d.y) || 0,
-      maxY: d3.max(layout.nodes, d => d.y + d.height) || 600,
-    };
-
-    const width = containerRef.current ? containerRef.current.clientWidth : 1000;
-    const height = containerRef.current ? containerRef.current.clientHeight : 700;
-
-    // Account for side panel width if open
-    const effectiveWidth = selectedNodeId ? Math.max(width - 360, 400) : width;
-
-    const dx = bounds.maxX - bounds.minX;
-    const dy = bounds.maxY - bounds.minY;
-    const x = (bounds.minX + bounds.maxX) / 2;
-    const y = (bounds.minY + bounds.maxY) / 2;
-
-    const scale = Math.max(0.45, Math.min(1.05, 0.85 / Math.max(dx / effectiveWidth, dy / height)));
-    const translate = [effectiveWidth / 2 - scale * x, height / 2 - scale * y];
-
-    svg.transition()
-      .duration(650)
-      .call(zoomBehaviorRef.current.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
-  }, [layout.nodes, selectedNodeId]);
+  }, [graphData?.rootId, viewMode, layout.nodes.length, handleFitView]);
 
   // Smooth Focus on a specific node
   const focusNode = useCallback((nodeId) => {
-    // 1. Expand all ancestors
     const node = nodeMap.get(nodeId);
     if (!node) return;
 
@@ -355,10 +550,9 @@ export default function ConceptGraphWorkspace({
     setExpandedNodes(toExpand);
     setSelectedNodeId(nodeId);
 
-    // 2. Pan and center zoom to node coordinates
     setTimeout(() => {
       const targetNode = layout.nodes.find(n => n.id === nodeId);
-      if (targetNode && svgRef.current) {
+      if (targetNode && svgRef.current && zoomBehaviorRef.current) {
         const svg = d3.select(svgRef.current);
         const width = containerRef.current ? containerRef.current.clientWidth : 1000;
         const height = containerRef.current ? containerRef.current.clientHeight : 700;
@@ -375,7 +569,7 @@ export default function ConceptGraphWorkspace({
           .duration(600)
           .call(zoomBehaviorRef.current.transform, transform);
       }
-    }, 50);
+    }, 60);
   }, [nodeMap, expandedNodes, layout.nodes]);
 
   // Search filtered results
@@ -391,18 +585,17 @@ export default function ConceptGraphWorkspace({
 
   // Zoom controls
   const handleZoomIn = () => {
-    if (!svgRef.current) return;
+    if (!svgRef.current || !zoomBehaviorRef.current) return;
     d3.select(svgRef.current).transition().duration(300).call(zoomBehaviorRef.current.scaleBy, 1.3);
   };
 
   const handleZoomOut = () => {
-    if (!svgRef.current) return;
+    if (!svgRef.current || !zoomBehaviorRef.current) return;
     d3.select(svgRef.current).transition().duration(300).call(zoomBehaviorRef.current.scaleBy, 0.75);
   };
 
   const handleResetZoom = () => {
-    if (!svgRef.current) return;
-    d3.select(svgRef.current).transition().duration(400).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+    handleFitView();
   };
 
   // Connected nodes & links for hover and active selection
@@ -430,50 +623,68 @@ export default function ConceptGraphWorkspace({
   }, [activeFocusId, layout.links]);
 
   return (
-    <div className="mindmap-workspace" ref={containerRef}>
+    <div className="concept-workspace" ref={containerRef}>
       {/* 1. Header Toolbar */}
-      <div className="mindmap-toolbar">
+      <div className="concept-toolbar">
         <div className="toolbar-left">
           <button 
             type="button" 
-            className="btn-mindmap-back" 
+            className="btn-toolbar-back" 
             onClick={onSwitchToChat}
-            title="Return to conversational chat"
+            title="Return to Grounded Document Chat"
           >
-            <ArrowLeft size={15} />
-            <span>Chat View</span>
+            <ArrowLeft size={16} />
+            <span className="btn-label hide-mobile">Chat View</span>
           </button>
 
-          <div className="mindmap-meta-badge">
-            <Sparkles size={13} className="text-accent" />
-            <span className="doc-name truncate" title={activeDoc?.filename}>
-              {activeDoc?.filename}
-            </span>
-            <span className="mindmap-chip">
-              {graphData?.nodes?.length || 0} Concepts &bull; {graphData?.links?.length || 0} Linkages
-            </span>
+          <div className="toolbar-divider" />
+
+          {/* View Mode Switcher */}
+          <div className="view-mode-pill-group">
+            <button
+              type="button"
+              className={`btn-mode-pill ${viewMode === 'mindmap' ? 'active' : ''}`}
+              onClick={() => setViewMode('mindmap')}
+              title="Two-sided balanced mind map layout"
+            >
+              <FolderTree size={13} />
+              <span>Mind Map</span>
+            </button>
+            <button
+              type="button"
+              className={`btn-mode-pill ${viewMode === 'network' ? 'active' : ''}`}
+              onClick={() => setViewMode('network')}
+              title="Interactive force-directed knowledge network"
+            >
+              <Network size={13} />
+              <span>Network</span>
+            </button>
           </div>
+
+          <span className="graph-stats hide-tablet">
+            {graphData?.nodes?.length || 0} Concepts • {graphData?.links?.length || 0} Relations
+          </span>
         </div>
 
         {/* Center: Search & Concept Finder */}
         <div className="toolbar-center">
-          <div className="mindmap-search-capsule">
+          <div className="concept-search-wrapper">
             <Search size={14} className="search-icon" />
-            <input 
-              type="text" 
-              placeholder="Search concepts or topics..."
+            <input
+              type="text"
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
                 setIsSearchOpen(true);
               }}
               onFocus={() => setIsSearchOpen(true)}
-              className="mindmap-search-input"
+              placeholder="Search concepts or topics..."
+              className="concept-search-input"
             />
             {searchQuery && (
               <button 
                 type="button" 
-                className="search-clear-btn" 
+                className="btn-clear-search" 
                 onClick={() => {
                   setSearchQuery('');
                   setIsSearchOpen(false);
@@ -483,14 +694,14 @@ export default function ConceptGraphWorkspace({
               </button>
             )}
 
-            {/* Search Dropdown Results */}
+            {/* Quick Filter Dropdown */}
             {isSearchOpen && searchResults.length > 0 && (
-              <div className="search-dropdown-menu">
+              <div className="concept-search-dropdown">
                 {searchResults.map(result => (
                   <button
                     key={result.id}
                     type="button"
-                    className="search-dropdown-item"
+                    className="search-result-item"
                     onClick={() => {
                       focusNode(result.id);
                       setIsSearchOpen(false);
@@ -541,6 +752,17 @@ export default function ConceptGraphWorkspace({
             <RotateCcw size={14} className={loading ? 'spin' : ''} />
             <span className="hide-mobile">Refresh</span>
           </button>
+
+          <button 
+            type="button" 
+            className="btn-toolbar-ghost btn-regenerate" 
+            onClick={() => activeDoc && fetchGraph(activeDoc.id, true)}
+            disabled={loading}
+            title="Regenerate concept graph relations with AI"
+          >
+            <Sparkles size={14} className={loading ? 'spin' : 'text-accent'} />
+            <span className="hide-mobile">Regenerate AI</span>
+          </button>
         </div>
       </div>
 
@@ -565,21 +787,94 @@ export default function ConceptGraphWorkspace({
             onClick={() => setSelectedNodeId(null)}
           >
             <defs>
-              {/* Subtle Linear Gradients for Nodes */}
+              {/* Dot Grid Canvas Pattern for tactile depth */}
+              <pattern id="dotGrid" width="28" height="28" patternUnits="userSpaceOnUse">
+                <circle cx="2" cy="2" r="1.1" fill="rgba(255, 255, 255, 0.05)" />
+              </pattern>
+
+              {/* Linear Gradients for Nodes */}
               <linearGradient id="rootGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.35" />
-                <stop offset="100%" stopColor="#6d28d9" stopOpacity="0.5" />
+                <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.9" />
+                <stop offset="50%" stopColor="#7c3aed" stopOpacity="0.95" />
+                <stop offset="100%" stopColor="#a855f7" stopOpacity="0.9" />
               </linearGradient>
 
-              <linearGradient id="primaryGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#1e2235" stopOpacity="0.95" />
-                <stop offset="100%" stopColor="#161826" stopOpacity="0.95" />
-              </linearGradient>
+              {/* Arrowhead Markers */}
+              <marker
+                id="mindmap-arrow"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto"
+              >
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="rgba(139, 92, 246, 0.45)" />
+              </marker>
 
-              <filter id="nodeGlow" x="-20%" y="-20%" width="140%" height="140%">
-                <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="#8b5cf6" floodOpacity="0.45" />
-              </filter>
+              <marker
+                id="mindmap-arrow-active"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto"
+              >
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#a78bfa" />
+              </marker>
+
+              <marker
+                id="mindmap-arrow-left"
+                viewBox="0 0 10 10"
+                refX="2"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto"
+              >
+                <path d="M 8 1.5 L 0 5 L 8 8.5 z" fill="rgba(139, 92, 246, 0.45)" />
+              </marker>
+
+              <marker
+                id="mindmap-arrow-left-active"
+                viewBox="0 0 10 10"
+                refX="2"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto"
+              >
+                <path d="M 8 1.5 L 0 5 L 8 8.5 z" fill="#a78bfa" />
+              </marker>
+
+              <marker
+                id="mindmap-arrow-cross"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto"
+              >
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="rgba(244, 114, 182, 0.65)" />
+              </marker>
+
+              <marker
+                id="mindmap-arrow-cross-active"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto"
+              >
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f472b6" />
+              </marker>
             </defs>
+
+            {/* Subtle Dot Grid Canvas Background */}
+            <rect width="100%" height="100%" fill="url(#dotGrid)" />
 
             <g ref={zoomGroupRef} id="mindmap-zoom-group">
               {/* Links Layer */}
@@ -587,33 +882,56 @@ export default function ConceptGraphWorkspace({
                 {layout.links.map(link => {
                   const isConnected = connectedLinkIds.has(link.id);
                   const isTree = link.isTreeLink;
+                  const isLeft = link.side === 'left';
 
-                  // Smooth cubic bezier curve
                   const dx = link.target.x - link.source.x;
+                  const dy = link.target.y - link.source.y;
+                  
+                  // Smooth organic cubic curve for trees, gentle arched curve for cross links
                   const path = isTree
                     ? `M ${link.source.x} ${link.source.y} C ${link.source.x + dx * 0.45} ${link.source.y}, ${link.target.x - dx * 0.45} ${link.target.y}, ${link.target.x} ${link.target.y}`
-                    : `M ${link.source.x} ${link.source.y} Q ${(link.source.x + link.target.x) / 2} ${(link.source.y + link.target.y) / 2 - 40}, ${link.target.x} ${link.target.y}`;
+                    : `M ${link.source.x} ${link.source.y} Q ${(link.source.x + link.target.x) / 2} ${(link.source.y + link.target.y) / 2 - 25}, ${link.target.x} ${link.target.y}`;
+
+                  const midX = (link.source.x + link.target.x) / 2;
+                  const midY = (link.source.y + link.target.y) / 2 - (isTree ? 10 : 20);
+
+                  const marker = isConnected
+                    ? (isTree ? (isLeft ? "url(#mindmap-arrow-left-active)" : "url(#mindmap-arrow-active)") : "url(#mindmap-arrow-cross-active)")
+                    : (isTree ? (isLeft ? "url(#mindmap-arrow-left)" : "url(#mindmap-arrow)") : "url(#mindmap-arrow-cross)");
 
                   return (
                     <g key={link.id} className={`link-group ${isConnected ? 'active' : ''}`}>
                       <path
                         d={path}
                         className={`mindmap-link ${isTree ? 'tree-link' : 'cross-link'} ${isConnected ? 'active-link' : ''}`}
+                        markerEnd={marker}
                         style={{
-                          opacity: activeFocusId ? (isConnected ? 1 : 0.12) : (isTree ? 0.45 : 0.25)
+                          opacity: activeFocusId ? (isConnected ? 1 : 0.08) : (isTree ? 0.45 : 0.28)
                         }}
                       />
-                      {/* Optional Relationship label on cross-links or hover */}
-                      {(!isTree || isConnected) && link.relationship !== 'contains' && (
-                        <text
-                          x={(link.source.x + link.target.x) / 2}
-                          y={(link.source.y + link.target.y) / 2 - 6}
-                          className="link-label"
-                          textAnchor="middle"
-                          style={{ opacity: isConnected ? 1 : 0 }}
+                      {/* Relationship badge displayed cleanly when hovered/focused */}
+                      {isConnected && link.relationship && (
+                        <g 
+                          className="link-badge-group active"
+                          transform={`translate(${midX}, ${midY})`}
+                          style={{ pointerEvents: 'none' }}
                         >
-                          {link.relationship}
-                        </text>
+                          <rect
+                            x={-(Math.min(Math.max((link.relationship.length * 3.6) + 8, 30), 80))}
+                            y={-9}
+                            width={Math.min(Math.max((link.relationship.length * 7.2) + 16, 60), 160)}
+                            height={18}
+                            rx={9}
+                            className={`link-badge-bg ${isTree ? 'tree' : 'cross'} active`}
+                          />
+                          <text
+                            y={3.5}
+                            className="link-badge-text active"
+                            textAnchor="middle"
+                          >
+                            {link.relationship}
+                          </text>
+                        </g>
                       )}
                     </g>
                   );
@@ -628,6 +946,7 @@ export default function ConceptGraphWorkspace({
                   const isConnected = connectedNodeIds.has(node.id);
                   const isDimmed = activeFocusId && !isConnected && !isSelected;
                   const isRoot = node.level === 0;
+                  const theme = getCategoryTheme(node.group);
 
                   return (
                     <g
@@ -642,60 +961,94 @@ export default function ConceptGraphWorkspace({
                       onMouseLeave={() => setHoveredNodeId(null)}
                       style={{
                         cursor: 'pointer',
-                        opacity: isDimmed ? 0.3 : 1,
+                        opacity: isDimmed ? 0.25 : 1,
                         transition: 'opacity 0.2s, transform 0.2s'
                       }}
                     >
-                      {/* Main Node Capsule / Background */}
+                      {/* Main Node Card Pill */}
                       <rect
                         width={node.width}
                         height={node.height}
                         rx={node.rx}
                         className={`node-pill level-${node.level} ${isSelected ? 'active-pill' : ''}`}
-                        filter={isSelected ? 'url(#nodeGlow)' : undefined}
+                        fill={isRoot ? "url(#rootGradient)" : "rgba(18, 22, 36, 0.88)"}
+                        stroke={isRoot ? "#a78bfa" : (isSelected ? theme.color : theme.border)}
+                        strokeWidth={isRoot ? 2 : (isSelected ? 1.8 : 1.2)}
+                        style={{
+                          filter: isSelected ? `drop-shadow(0 0 10px ${theme.glow})` : undefined
+                        }}
                       />
+
+                      {/* Accent color bar for Level 1 category pillars */}
+                      {!isRoot && node.level === 1 && (
+                        <rect
+                          x={node.side === 'left' ? node.width - 4 : 0}
+                          y={6}
+                          width={4}
+                          height={node.height - 12}
+                          rx={2}
+                          fill={theme.color}
+                        />
+                      )}
 
                       {/* Sparkle icon for Root */}
                       {isRoot && (
-                        <g transform="translate(12, 16)">
-                          <circle cx="8" cy="8" r="10" fill="rgba(139, 92, 246, 0.4)" />
+                        <g transform="translate(14, 15)">
+                          <circle cx="10" cy="10" r="10" fill="rgba(255, 255, 255, 0.2)" />
                           <path
-                            d="M8 2 L10 6 L14 8 L10 10 L8 14 L6 10 L2 8 L6 6 Z"
-                            fill="#f3f4f6"
+                            d="M10 3 L12 8 L17 10 L12 12 L10 17 L8 12 L3 10 L8 8 Z"
+                            fill="#ffffff"
                           />
                         </g>
                       )}
 
-                      {/* Node Text & Labels */}
+                      {/* Node Title */}
                       <text
-                        x={isRoot ? 40 : 14}
-                        y={isRoot ? 24 : 18}
+                        x={isRoot ? 40 : (node.side === 'left' && node.level === 1 ? 12 : (node.side === 'right' && node.level === 1 ? 16 : 14))}
+                        y={node.level === 0 ? 30 : 20}
                         className={`node-title level-${node.level}`}
+                        style={{
+                          fill: '#f8fafc',
+                          fontSize: isRoot ? '13.5px' : '11.5px',
+                          fontWeight: isRoot ? 700 : 600,
+                          letterSpacing: '-0.01em'
+                        }}
                       >
-                        {node.title.length > 20 ? `${node.title.slice(0, 18)}…` : node.title}
+                        {node.title.length > (node.level === 0 ? 22 : 20) 
+                          ? `${node.title.slice(0, (node.level === 0 ? 20 : 18))}…` 
+                          : node.title}
                       </text>
 
                       {/* Category Subtitle */}
-                      <text
-                        x={isRoot ? 40 : 14}
-                        y={isRoot ? 38 : 31}
-                        className="node-group-label"
-                      >
-                        {node.group || (isRoot ? 'Root Concept' : 'Concept')}
-                      </text>
+                      {node.level > 0 && (
+                        <text
+                          x={node.side === 'left' && node.level === 1 ? 12 : (node.side === 'right' && node.level === 1 ? 16 : 14)}
+                          y={32}
+                          className="node-group-label"
+                          style={{
+                            fill: theme.text,
+                            fontSize: '8.5px',
+                            fontWeight: 600,
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.04em'
+                          }}
+                        >
+                          {node.group || 'Concept'}
+                        </text>
+                      )}
 
-                      {/* Expand / Collapse Indicator Pill (+ / −) */}
-                      {node.totalChildren > 0 && (
+                      {/* Expand / Collapse Indicator Pill (+ / −) positioned on outer edge */}
+                      {node.totalChildren > 0 && !isRoot && (
                         <g 
                           className="node-expander-btn"
-                          transform={`translate(${node.width - 10}, ${node.height / 2})`}
+                          transform={`translate(${node.side === 'left' ? 0 : node.width}, ${node.height / 2})`}
                           onClick={(e) => toggleNodeExpansion(node.id, e)}
                           title={node.isExpanded ? "Collapse subtopics" : `Expand ${node.totalChildren} subtopics`}
                         >
                           <circle 
                             cx="0" 
                             cy="0" 
-                            r="11" 
+                            r="9.5" 
                             className={`expander-circle ${node.isExpanded ? 'expanded' : 'collapsed'}`} 
                           />
                           <text 
@@ -716,49 +1069,41 @@ export default function ConceptGraphWorkspace({
           </svg>
         )}
 
-        {/* 3. Floating Minimal Canvas Controls (Bottom-Left) */}
+        {/* 3. Floating Canvas Minimal Controls */}
         <div className="mindmap-floating-controls">
           <button 
             type="button" 
             className="floating-ctrl-btn" 
-            onClick={handleZoomIn} 
-            title="Zoom In (+)"
+            onClick={handleZoomIn}
+            title="Zoom In"
           >
-            <Plus size={16} />
+            <Plus size={15} />
           </button>
           <button 
             type="button" 
             className="floating-ctrl-btn" 
-            onClick={handleZoomOut} 
-            title="Zoom Out (−)"
+            onClick={handleZoomOut}
+            title="Zoom Out"
           >
-            <Minus size={16} />
+            <Minus size={15} />
           </button>
           <button 
             type="button" 
             className="floating-ctrl-btn" 
-            onClick={handleFitView} 
-            title="Fit to Screen"
+            onClick={handleResetZoom}
+            title="Fit to Center"
           >
-            <Maximize2 size={15} />
-          </button>
-          <button 
-            type="button" 
-            className="floating-ctrl-btn" 
-            onClick={handleResetZoom} 
-            title="Reset Zoom"
-          >
-            <RotateCcw size={14} />
+            <Maximize2 size={14} />
           </button>
         </div>
 
-        {/* 4. Contextual Node Information Panel (Slide-Over on Right) */}
+        {/* 4. Detail Side Panel on Node Selection */}
         {selectedNode && (
-          <aside className="mindmap-node-panel">
+          <aside className="mindmap-side-panel">
             <div className="panel-header">
               <div className="panel-title-group">
-                <span className="panel-level-tag">
-                  Level {selectedNode.level} &bull; {selectedNode.group || 'Core Concept'}
+                <span className="panel-concept-level">
+                  Level {selectedNode.level} • {selectedNode.group || 'Core Concept'}
                 </span>
                 <h3 className="panel-concept-title">{selectedNode.title}</h3>
               </div>
@@ -772,25 +1117,25 @@ export default function ConceptGraphWorkspace({
               </button>
             </div>
 
-            <div className="panel-content-scroll">
-              {/* Hierarchy Breadcrumb */}
-              {breadcrumb.length > 1 && (
-                <div className="panel-breadcrumb">
-                  {breadcrumb.map((b, idx) => (
-                    <React.Fragment key={b.id}>
-                      <button 
-                        type="button" 
-                        className={`breadcrumb-step ${b.id === selectedNode.id ? 'active' : ''}`}
-                        onClick={() => focusNode(b.id)}
-                      >
-                        {b.title}
-                      </button>
-                      {idx < breadcrumb.length - 1 && <ChevronRight size={12} className="text-muted" />}
-                    </React.Fragment>
-                  ))}
-                </div>
-              )}
+            {/* Breadcrumb Hierarchy Path */}
+            {breadcrumb.length > 1 && (
+              <div className="panel-breadcrumb">
+                {breadcrumb.map((step, idx) => (
+                  <React.Fragment key={step.id}>
+                    <button 
+                      type="button" 
+                      className={`breadcrumb-step ${step.id === selectedNode.id ? 'active' : ''}`}
+                      onClick={() => focusNode(step.id)}
+                    >
+                      {step.title}
+                    </button>
+                    {idx < breadcrumb.length - 1 && <ChevronRight size={11} className="breadcrumb-arrow" />}
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
 
+            <div className="panel-body">
               {/* AI Concept Summary */}
               <div className="panel-section">
                 <div className="panel-section-title">
@@ -802,28 +1147,23 @@ export default function ConceptGraphWorkspace({
                 </p>
               </div>
 
-              {/* Grounded Source References */}
+              {/* Source Passage References */}
               {selectedNode.sourceReferences && selectedNode.sourceReferences.length > 0 && (
                 <div className="panel-section">
                   <div className="panel-section-title">
                     <FileText size={13} className="text-accent" />
-                    <span>Source Grounding</span>
+                    <span>Grounded Document Evidence ({selectedNode.sourceReferences.length})</span>
                   </div>
                   <div className="panel-sources-list">
                     {selectedNode.sourceReferences.map((src, idx) => (
                       <div key={idx} className="panel-source-card">
                         <div className="source-card-header">
-                          <span className="source-doc-name truncate">{src.document}</span>
-                          <button
-                            type="button"
+                          <span className="source-heading">{src.heading || 'Document Passage'}</span>
+                          <button 
+                            type="button" 
                             className="source-page-badge"
-                            onClick={() => onCitationClick && onCitationClick(src.page, [{
-                              page_number: src.page,
-                              heading: src.heading,
-                              content: src.snippet,
-                              score: 0.95
-                            }])}
-                            title="Inspect page citation evidence"
+                            onClick={() => onCitationClick && onCitationClick({ page: src.page, document: src.document })}
+                            title="Jump to page in PDF"
                           >
                             <FileKey size={11} />
                             <span>Page {src.page}</span>
@@ -850,11 +1190,16 @@ export default function ConceptGraphWorkspace({
                       <button
                         key={idx}
                         type="button"
-                        className="panel-related-chip"
+                        className={`panel-related-chip ${rel.direction || 'outgoing'}`}
                         onClick={() => focusNode(rel.targetId)}
-                        title={`Relationship: ${rel.relationship}`}
+                        title={`${rel.direction === 'incoming' ? 'Pointed from' : 'Points to'} ${rel.targetTitle}: ${rel.relationship}`}
                       >
-                        <span className="rel-tag">{rel.relationship}</span>
+                        <div className="chip-header">
+                          <span className={`rel-dir-badge ${rel.direction || 'outgoing'}`}>
+                            {rel.direction === 'incoming' ? '◀ pointed by' : 'points to ▶'}
+                          </span>
+                          <span className="rel-tag">{rel.relationship}</span>
+                        </div>
                         <span className="rel-name">{rel.targetTitle}</span>
                       </button>
                     ))}

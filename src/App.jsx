@@ -8,13 +8,43 @@ import Composer from './components/Composer';
 import InsightsDrawer from './components/InsightsDrawer';
 import ConceptGraphWorkspace from './components/ConceptGraphWorkspace';
 import CitationModal from './components/CitationModal';
-import { UploadCloud } from 'lucide-react';
-
-const API_BASE = 'http://localhost:5000/api';
+import PdfViewer from './components/PdfViewer';
+import { UploadCloud, GripVertical } from 'lucide-react';
+import { API_BASE } from './config/api';
+import { 
+  authFetch, 
+  isTokenExpired, 
+  setupSessionTimeout, 
+  dispatchSessionExpired, 
+  clearStoredAuth 
+} from './utils/auth';
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || null);
-  const [user, setUser] = useState(JSON.parse(localStorage.getItem('user')) || null);
+  const [sessionNotice, setSessionNotice] = useState(() => {
+    const savedToken = localStorage.getItem('token');
+    if (savedToken && isTokenExpired(savedToken)) {
+      clearStoredAuth();
+      return 'Your session has expired. Please log in again to continue.';
+    }
+    return '';
+  });
+
+  const [token, setToken] = useState(() => {
+    const savedToken = localStorage.getItem('token');
+    if (savedToken && isTokenExpired(savedToken)) {
+      clearStoredAuth();
+      return null;
+    }
+    return savedToken || null;
+  });
+
+  const [user, setUser] = useState(() => {
+    const savedToken = localStorage.getItem('token');
+    if (!savedToken || isTokenExpired(savedToken)) {
+      return null;
+    }
+    return JSON.parse(localStorage.getItem('user')) || null;
+  });
   
   // Documents state
   const [documents, setDocuments] = useState([]);
@@ -26,6 +56,17 @@ export default function App() {
 
   // View state
   const [activeView, setActiveView] = useState('chat'); // 'chat' | 'graph'
+  const [isPdfSplitOpen, setIsPdfSplitOpen] = useState(() => {
+    const saved = localStorage.getItem('isPdfSplitOpen');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const saved = localStorage.getItem('pdfSplitRatio');
+    return saved ? Math.min(80, Math.max(20, parseFloat(saved))) : 50;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const splitWorkspaceRef = useRef(null);
+  const [pdfTargetPage, setPdfTargetPage] = useState(1);
   const [isInsightsOpen, setIsInsightsOpen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [selectedCitation, setSelectedCitation] = useState(null);
@@ -86,13 +127,48 @@ export default function App() {
     }
   }, [activeDoc?.id, activeDoc?.status, token]);
 
+  // Dedicated session expiration handler
+  const handleSessionExpired = (reason = 'Your session has expired. Please log in again.') => {
+    clearInterval(pollingRef.current);
+    clearStoredAuth();
+    setToken(null);
+    setUser(null);
+    setActiveDoc(null);
+    setSelectedDocs([]);
+    setChatHistory([]);
+    setSessionNotice(reason);
+  };
+
+  // JWT session timeout listener and heartbeat
+  useEffect(() => {
+    if (!token) return;
+
+    if (isTokenExpired(token)) {
+      handleSessionExpired('Your session has expired. Please log in again.');
+      return;
+    }
+
+    // Set up timer and 10-second interval heartbeat
+    const cleanup = setupSessionTimeout(token, () => {
+      handleSessionExpired('Your session has expired. Please log in again.');
+    });
+
+    const onSessionExpiredEvent = (e) => {
+      handleSessionExpired(e.detail?.message || 'Your session has expired. Please log in again.');
+    };
+    window.addEventListener('auth:session-expired', onSessionExpiredEvent);
+
+    return () => {
+      cleanup();
+      window.removeEventListener('auth:session-expired', onSessionExpiredEvent);
+    };
+  }, [token]);
+
   // Document Fetching
   const fetchDocuments = async () => {
     setLoadingDocs(true);
     try {
-      const res = await fetch(`${API_BASE}/documents`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`${API_BASE}/documents`, {}, token);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to fetch documents');
 
@@ -114,9 +190,7 @@ export default function App() {
     clearInterval(pollingRef.current);
     pollingRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/documents`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const res = await authFetch(`${API_BASE}/documents`, {}, token);
         const updatedList = await res.json();
         if (res.ok) {
           setDocuments(updatedList);
@@ -212,6 +286,9 @@ export default function App() {
           handleSelectDoc(doc);
           fetchDocuments();
         }, 600);
+      } else if (xhr.status === 401 || xhr.status === 403) {
+        setUploading(false);
+        dispatchSessionExpired('Your session has expired during upload. Please log in again.');
       } else {
         const errorMsg = JSON.parse(xhr.responseText).error || 'Upload failed';
         alert(`Error: ${errorMsg}`);
@@ -233,10 +310,9 @@ export default function App() {
     if (!confirmDel) return;
 
     try {
-      const res = await fetch(`${API_BASE}/documents/${docId}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`${API_BASE}/documents/${docId}`, {
+        method: 'DELETE'
+      }, token);
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || 'Failed to delete');
@@ -257,9 +333,7 @@ export default function App() {
   // Chat logic
   const loadChatHistory = async (docIdsStr) => {
     try {
-      const res = await fetch(`${API_BASE}/chat/${docIdsStr}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`${API_BASE}/chat/${docIdsStr}`, {}, token);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load chat history');
       setChatHistory(data);
@@ -279,17 +353,16 @@ export default function App() {
 
     try {
       const docIds = readyDocs.map(d => d.id);
-      const res = await fetch(`${API_BASE}/chat`, {
+      const res = await authFetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           documentIds: docIds,
           question: query
         })
-      });
+      }, token);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to generate answer');
 
@@ -318,9 +391,7 @@ export default function App() {
   const fetchDocInsights = async (docId) => {
     setLoadingSummary(true);
     try {
-      const res = await fetch(`${API_BASE}/documents/${docId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`${API_BASE}/documents/${docId}`, {}, token);
       const data = await res.json();
       if (res.ok) {
         setDocSummary({
@@ -339,25 +410,106 @@ export default function App() {
   const handleAuthSuccess = (newToken, newUser) => {
     localStorage.setItem('token', newToken);
     localStorage.setItem('user', JSON.stringify(newUser));
+    setSessionNotice('');
     setToken(newToken);
     setUser(newUser);
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('activeDoc');
-    localStorage.removeItem('selectedDocs');
+    clearInterval(pollingRef.current);
+    clearStoredAuth();
     setToken(null);
     setUser(null);
     setActiveDoc(null);
     setSelectedDocs([]);
     setChatHistory([]);
+    setSessionNotice('');
   };
 
-  // Citation click handler
+  // Drag-to-resize split pane handler
+  const handleSplitMouseDown = (e) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  const handleSplitDoubleClick = () => {
+    setSplitRatio(50);
+    localStorage.setItem('pdfSplitRatio', '50');
+  };
+
+  const handleTogglePdfExpand = () => {
+    setSplitRatio(prev => {
+      const next = prev > 60 ? 50 : 75;
+      localStorage.setItem('pdfSplitRatio', String(next));
+      return next;
+    });
+  };
+
+  // Dynamic resizing pointer move and release listeners
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handlePointerMove = (e) => {
+      if (!splitWorkspaceRef.current) return;
+      const rect = splitWorkspaceRef.current.getBoundingClientRect();
+      const isMobile = window.innerWidth <= 900;
+      let newRatio;
+      if (isMobile) {
+        const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY);
+        if (clientY === undefined) return;
+        newRatio = ((clientY - rect.top) / rect.height) * 100;
+      } else {
+        const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX);
+        if (clientX === undefined) return;
+        newRatio = ((clientX - rect.left) / rect.width) * 100;
+      }
+      const clamped = Math.min(80, Math.max(20, Math.round(newRatio * 10) / 10));
+      setSplitRatio(clamped);
+      localStorage.setItem('pdfSplitRatio', String(clamped));
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener('mousemove', handlePointerMove);
+    window.addEventListener('mouseup', handlePointerUp);
+    window.addEventListener('touchmove', handlePointerMove, { passive: false });
+    window.addEventListener('touchend', handlePointerUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handlePointerMove);
+      window.removeEventListener('mouseup', handlePointerUp);
+      window.removeEventListener('touchmove', handlePointerMove);
+      window.removeEventListener('touchend', handlePointerUp);
+    };
+  }, [isResizing]);
+
+  // Split PDF toggle handler
+  const handleTogglePdfSplit = () => {
+    setIsPdfSplitOpen(prev => {
+      const next = !prev;
+      localStorage.setItem('isPdfSplitOpen', String(next));
+      return next;
+    });
+  };
+
+  // Citation click handler (navigates PDF viewer to page and opens source evidence modal)
   const handleCitationClick = (pageNum, sources) => {
     const matched = (sources || []).filter(s => s.page_number === pageNum);
+
+    // If source citation points to a specific document that isn't currently active, switch to it
+    if (matched.length > 0 && matched[0].filename) {
+      const docMatch = documents.find(d => d.filename === matched[0].filename);
+      if (docMatch && (!activeDoc || activeDoc.id !== docMatch.id)) {
+        setActiveDoc(docMatch);
+      }
+    }
+
+    setPdfTargetPage(pageNum);
+    setIsPdfSplitOpen(true);
+    localStorage.setItem('isPdfSplitOpen', 'true');
+
     setSelectedCitation({
       pageNum,
       sources: matched.length > 0 ? matched : sources
@@ -387,7 +539,13 @@ export default function App() {
   };
 
   if (!token) {
-    return <Auth onAuthSuccess={handleAuthSuccess} />;
+    return (
+      <Auth 
+        onAuthSuccess={handleAuthSuccess} 
+        sessionNotice={sessionNotice}
+        onClearNotice={() => setSessionNotice('')}
+      />
+    );
   }
 
   return (
@@ -436,6 +594,8 @@ export default function App() {
           selectedDocs={selectedDocs}
           activeView={activeView}
           onViewChange={setActiveView}
+          isPdfSplitOpen={isPdfSplitOpen}
+          onTogglePdfSplit={handleTogglePdfSplit}
           isInsightsOpen={isInsightsOpen}
           onToggleInsights={() => setIsInsightsOpen(prev => !prev)}
           onToggleMobileSidebar={() => setIsMobileSidebarOpen(prev => !prev)}
@@ -456,37 +616,78 @@ export default function App() {
             onCitationClick={handleCitationClick}
           />
         ) : (
-          <div className="chat-workspace-wrapper">
-            {/* Independently scrolling conversation stream */}
-            <Conversation
-              history={chatHistory}
-              loading={loadingChat}
-              activeDoc={activeDoc}
-              selectedDocs={selectedDocs}
-              onCitationClick={handleCitationClick}
-              onQuickPrompt={handleSendQuery}
-              onSendQuery={handleSendQuery}
-            />
+          <div 
+            ref={splitWorkspaceRef}
+            className={`chat-workspace-wrapper ${isPdfSplitOpen && activeDoc ? 'has-split-pdf' : ''} ${isResizing ? 'is-resizing' : ''}`}
+            style={isPdfSplitOpen && activeDoc ? { '--split-ratio': `${splitRatio}%` } : undefined}
+          >
+            {/* Side-by-side Dynamic PDF Viewer Pane */}
+            {isPdfSplitOpen && activeDoc && (
+              <>
+                <div className="pdf-pane">
+                  <PdfViewer
+                    doc={activeDoc}
+                    token={token}
+                    targetPage={pdfTargetPage}
+                    selectedDocs={selectedDocs}
+                    onSelectDoc={handleSelectDoc}
+                    isExpanded={splitRatio > 60}
+                    onToggleExpand={handleTogglePdfExpand}
+                    onClose={() => {
+                      setIsPdfSplitOpen(false);
+                      localStorage.setItem('isPdfSplitOpen', 'false');
+                    }}
+                  />
+                </div>
 
-            {/* Structurally fixed composer at bottom */}
-            <Composer
-              value={chatInput}
-              onChange={setChatInput}
-              onSend={() => handleSendQuery()}
-              disabled={readyDocs.length === 0}
-              loading={loadingChat}
-              placeholder={
-                readyDocs.length > 1
-                  ? `Ask anything across ${readyDocs.length} selected documents...`
-                  : activeDoc && activeDoc.status === 'processed'
-                    ? `Ask anything about "${activeDoc.filename}"...`
-                    : "Select or upload a PDF to begin querying..."
-              }
-              onAttachClick={() => {
-                const fileInput = document.querySelector('.hidden-file-input');
-                if (fileInput) fileInput.click();
-              }}
-            />
+                {/* Draggable Divider Splitter */}
+                <div 
+                  className={`workspace-splitter ${isResizing ? 'active' : ''}`}
+                  onMouseDown={handleSplitMouseDown}
+                  onTouchStart={handleSplitMouseDown}
+                  onDoubleClick={handleSplitDoubleClick}
+                  title="Drag to resize PDF & Chat views · Double-click to reset (50/50)"
+                  role="separator"
+                  aria-orientation="vertical"
+                >
+                  <div className="splitter-handle">
+                    <GripVertical size={12} />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Chat conversation stream and fixed bottom composer */}
+            <div className="chat-pane">
+              <Conversation
+                history={chatHistory}
+                loading={loadingChat}
+                activeDoc={activeDoc}
+                selectedDocs={selectedDocs}
+                onCitationClick={handleCitationClick}
+                onQuickPrompt={handleSendQuery}
+                onSendQuery={handleSendQuery}
+              />
+
+              <Composer
+                value={chatInput}
+                onChange={setChatInput}
+                onSend={() => handleSendQuery()}
+                disabled={readyDocs.length === 0}
+                loading={loadingChat}
+                placeholder={
+                  readyDocs.length > 1
+                    ? `Ask anything across ${readyDocs.length} selected documents...`
+                    : activeDoc && activeDoc.status === 'processed'
+                      ? `Ask anything about "${activeDoc.filename}"...`
+                      : "Select or upload a PDF to begin querying..."
+                }
+                onAttachClick={() => {
+                  const fileInput = document.querySelector('.hidden-file-input');
+                  if (fileInput) fileInput.click();
+                }}
+              />
+            </div>
           </div>
         )}
 

@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
-import { Mail, Lock, User, ArrowRight, UserPlus } from 'lucide-react';
+import { Mail, Lock, User, ArrowRight, UserPlus, Clock, X } from 'lucide-react';
+import { API_BASE } from '../config/api';
 
-const API_BASE = 'http://localhost:5000/api';
-
-export default function Auth({ onAuthSuccess }) {
+export default function Auth({ onAuthSuccess, sessionNotice, onClearNotice }) {
   const [activeTab, setActiveTab] = useState('login'); // 'login' | 'register'
   
   // Form fields
@@ -21,6 +20,7 @@ export default function Auth({ onAuthSuccess }) {
 
   const switchTab = (tab) => {
     setMessage('');
+    if (onClearNotice) onClearNotice();
     setActiveTab(tab);
   };
 
@@ -88,8 +88,28 @@ export default function Auth({ onAuthSuccess }) {
   };
 
   return (
-    <section id="section-auth" class="auth-section">
+    <section id="section-auth" className="auth-section">
       <div className="glass-card auth-card">
+        {sessionNotice && (
+          <div className="auth-session-expired-banner">
+            <Clock size={18} className="session-expired-icon" />
+            <div className="session-expired-content">
+              <span className="session-expired-title">Session Expired</span>
+              <span className="session-expired-desc">{sessionNotice}</span>
+            </div>
+            {onClearNotice && (
+              <button 
+                type="button" 
+                className="session-expired-dismiss" 
+                onClick={onClearNotice} 
+                title="Dismiss message"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="auth-tabs">
           <button 
             type="button"

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { ArrowUp, Paperclip, Sparkles } from 'lucide-react';
+import { ArrowUp, Paperclip } from 'lucide-react';
 
 export default function Composer({
   value,

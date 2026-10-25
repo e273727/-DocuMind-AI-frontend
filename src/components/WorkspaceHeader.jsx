@@ -6,7 +6,8 @@ import {
   Sparkles, 
   Layers, 
   FileText,
-  Trash2
+  Trash2,
+  Columns
 } from 'lucide-react';
 
 export default function WorkspaceHeader({
@@ -14,6 +15,8 @@ export default function WorkspaceHeader({
   selectedDocs = [],
   activeView, // 'chat' | 'graph'
   onViewChange,
+  isPdfSplitOpen,
+  onTogglePdfSplit,
   isInsightsOpen,
   onToggleInsights,
   onToggleMobileSidebar,
@@ -109,6 +112,18 @@ export default function WorkspaceHeader({
           >
             <Trash2 size={14} />
             <span className="hide-mobile">Clear</span>
+          </button>
+        )}
+
+        {activeView === 'chat' && activeDoc && (
+          <button 
+            type="button" 
+            className={`btn-header-ghost ${isPdfSplitOpen ? 'active' : ''}`}
+            onClick={onTogglePdfSplit}
+            title={isPdfSplitOpen ? "Hide PDF side-by-side view" : "View PDF side-by-side with chat"}
+          >
+            <Columns size={14} />
+            <span className="hide-mobile">{isPdfSplitOpen ? "Hide PDF" : "Split PDF"}</span>
           </button>
         )}
 

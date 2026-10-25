@@ -4,10 +4,6 @@ import {
   FileKey, 
   Compass, 
   HelpCircle, 
-  Layers, 
-  MessageSquareCode,
-  FileText,
-  User,
   Bot
 } from 'lucide-react';
 
